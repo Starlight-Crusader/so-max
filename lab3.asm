@@ -1,379 +1,469 @@
-bits 16
-org 0x7e00
+bits    16
+org     7e00h
+
+section .text
 
 %include 'lab3_lib.asm'
 
-section .text:
 start:
-  mov al, 0x3
-  call set_video_mode
+    call    reset_memory
+    xor     sp, sp
 
-  mov word [bufflen], 0x0
+    ; print the options listing str.
 
-.main_loop:
-  call clear_vars
-  mov si, select_operation_message
-  call print
-  
-  call read_key
-  call printch
-  call put_neline
+    mov     si, op_list_str
+    mov     cx, op_list_str_len
+    call    print_str
 
-  ; check that character is in needed bounds (1-3)
-  cmp al, OP_KEYBOARD_FLOPPY
-  jl .main_loop
-  cmp al, OP_RAM_FLOPPY
-  jg .wrong_op
+    ; read user's choice
 
-  cmp al, OP_KEYBOARD_FLOPPY
-  jz .keyboard_floppy
-  cmp al, OP_FLOPPY_RAM
-  jz .floppy_ram
-  cmp al, OP_RAM_FLOPPY
-  jz .ram_floppy
-  
-  jmp .wrong_op ; in case something goes wrong
+    mov     ah, KB_READ
+    int     INT_KB
 
-.program_end:
-  cli
-  hlt
+    ; print user's choice
 
-.wrong_op:
-  call clear_screen
-  mov si, wrong_op_message
-  call println
-  jmp .main_loop
+    mov     ah, VID_TTY
+    int     INT_VID
 
-.on_enter:
-  call put_neline
-  call print_buffer
-  mov word [bufflen], 0x0
-  jmp .main_loop
+    ; direct the exec. flow
 
-.on_backspace:
-  jmp .main_loop
+    cmp     al, OP_KEYBOARD_FLOPPY
+    je      kbd_to_flp
 
-.keyboard_floppy: ; handle keyboard to floppy
-  mov si, keyboard_floppy_message
-  call println
-  call read_n
-  call read_head
-  call read_track
-  call read_sector
+    cmp     al, OP_FLOPPY_RAM
+    je      flp_to_ram
 
-  mov si, input_string_message
-  call println
+    cmp     al, OP_RAM_FLOPPY
+    je      ram_to_flp
 
-  call read_buffer
-  call put_neline
+    jmp     error
 
-  ; Now we have N, {Head, Track, Sector} and String to write
-  call reset_floppy
+kbd_to_flp:
 
-  push    ax
+    ; read the string
 
-  mov     ax, 0x0
+    call    break_line
+    mov     si, str_in_str
+    mov     cx, str_in_str_len
+    call    print_str
+
+    call    read_input
+
+    ; save the str. to its own buffer
+
+    mov     si, input_buffer
+    mov     di, str_buffer
+    mov     cx, 1
+    mov     bx, 256
+    call    copy_buffer
+
+    ; read N
+
+    call    break_line
+    mov     si, n_in_str
+    mov     cx, n_in_str_len
+    call    print_str
+
+    call    read_input
+
+    mov     ax, 0
+    call    check_num_input
+
+    cmp     byte [operation_flag], 0
+    je      error
+
+    mov     di, n
+    mov     si, input_buffer
+    call    atoi
+
+    ; read HTS address
+
+    call    read_hts_addr
+
+    cmp     byte [operation_flag], 0
+    je      error
+
+    ; preapare the buffer to write to the floppy
+
+    mov     si, str_buffer
+    mov     di, storage_buffer
+    mov     cx, [n]
+    mov     bx, 512
+    call    copy_buffer
+
+    ; calculate the number of sectos to write
+
+    xor     dx, dx
+    mov     ax, [copy_size]
+    mov     bx, 512
+    div     bx
+
+    ; write to the floppy
+
+    push    ax
+
+    xor     ax, ax
 	mov     es, ax
-  mov     bx, buffer
+    mov     bx, storage_buffer
 
-  pop     ax
+    pop     ax
 
-  mov     ah, 0x3
-  mov     al, [n]
-  mov     ch, [track]
-  mov     cl, [sector]
-  mov     dh, [head]
-  mov     dl, 0x0
+    mov     ah, DSK_WRITE
+    add     al, 0
+    mov     ch, [hts + 2]
+    mov     cl, [hts + 4]
+    mov     dh, [hts + 0]
+    mov     dl, 0
 
-  int     INT_DSK
-  mov     al, ah
-  xor     ah, ah
-  call    print_num
+    int     INT_DSK
 
+    ; print the error code
 
-  mov ah, 0
-  int 0x16
+    call    display_error_code
 
-  mov si, press_any_key
+    ; print the string read
 
-  call println
-  call read_key
-  call clear_screen
-  jmp .main_loop
+    call    break_line
+    call    break_line
+    mov     si, str_buffer
+    mov     cx, 256
+    call    print_str
 
-.floppy_ram: ; handle floppy to ram
-  mov si, floppy_ram_message
-  call println
-  call read_n
-  call read_head
-  call read_track
-  call read_sector
-  call read_address
+    jmp     terminate
 
+flp_to_ram:
 
-  call put_neline
+    ; read HTS address
 
-  ; Now we have N, {Head, Track, Sector} and String to write
-  call reset_floppy
+    call    read_hts_addr
 
-  push    ax
+    cmp     byte [operation_flag], 0
+    je      error
 
-  mov     ax, [segment_word]
-	mov     es, ax
-  mov     bx, buffer
+    ; read RAM address
 
-  pop     ax
+    call    read_ram_addr
 
-  mov     ah, 0x2       ; function number for reading sectors
-  mov     al, [n]       ; number of sectors to read
-  mov     ch, [track]   ; track number
-  mov     cl, [sector]  ; sector number
-  mov     dh, [head]    ; head number
-  mov     dl, 0x0       ; drive number (0 for floppy)
-  mov     bx, buffer    ; buffer to load data into
+    cmp     byte [operation_flag], 0
+    je      error
 
-  int     0x13          ; call BIOS interrupt
-  jc      $    ; jump to error handling if carry flag is set
+    ; read N
 
-  ; Data is now in 'buffer'
-  ; Process or move the data as needed
+    call    break_line
+    mov     si, n_in_str
+    mov     cx, n_in_str_len
+    call    print_str
 
-  jmp .main_loop
+    call    read_input
 
-.ram_floppy: ; handle ram to floppy
-  mov si, ram_floppy_message
-  call println
+    mov     ax, 0
+    call    check_num_input
 
+    cmp     byte [operation_flag], 0
+    je      error
 
-  jmp .main_loop
+    mov     di, n
+    mov     si, input_buffer
+    call    atoi
 
-add_to_buffer:
-  push cx
+    ; read data from floppy
 
-  mov cx, word [bufflen]
-  mov si, buffer
-  add si, cx
-  mov byte [si], al
-  inc cx
-  mov word [bufflen], cx
+    mov     es, [address + 0]
+    mov     bx, [address + 2]
 
-  pop cx
-  ret
+    mov     ah, DSK_READ
+    mov     al, [n]
+    mov     ch, [hts + 2]
+    mov     cl, [hts + 4]
+    mov     dh, [hts + 0]
+    mov     dl, 0
 
-print_buffer:
-  mov si, buffer
-  call print
-  call put_neline
-  ret
+    int     INT_DSK
 
-read_buffer:
-  push bp
-  mov bp, sp
-  pusha
+    ; print error code
+    
+    call    display_error_code
 
-.process_key:
-  call read_key
+    ; print the data read
 
-  cmp al, KEY_CR
-  jz .on_enter
+    call    paginated_output
 
-  cmp al, KEY_BACKSPACE
-  jz .on_backspace
+    jmp     terminate
 
-  mov cx, word [bufflen]
-  cmp cx, MAX_BUFFLEN
-  jz .process_key
+ram_to_flp:
 
-  call printch
-  call add_to_buffer
-  jmp .process_key
+    ; read RAM address
 
-.on_enter:
-  popa
-  pop bp
-  ret
+    call    read_ram_addr
 
-.on_backspace:
-  mov ah, VID_QUERY_CUR
-  mov bh, 0x0
-  int INT_VID
+    cmp     byte [operation_flag], 0
+    je      error
 
-  cmp dl, 0x0
-  jnz .on_backspace_cont
-  mov cx, word [bufflen]
-  cmp cx, 0x0
-  jz .process_key
-  
-  cmp dh, 0x0
-  jz .process_key
-  dec dh
-  mov dl, 0x4f
-  mov ah, VID_SET_CUR_POS
-  int INT_VID
+    ; read HTS address
 
-  mov ah, 0xa
-  mov al, KEY_SPACE
-  mov bh, 0x0
-  mov cx, 0x1
-  int INT_VID
+    call    read_hts_addr
 
-  mov cx, word [bufflen]
-  cmp cx, 0x0
-  jg .decrement_bufflen
-  
-  jmp .process_key
+    cmp     byte [operation_flag], 0
+    je      error
 
-.decrement_bufflen:
-  mov cx, word [bufflen]
-  dec cx
-  mov word [bufflen], cx
-  jmp .process_key
+    ; read Q
 
-.on_backspace_cont:
-  mov cx, word [bufflen]
-  cmp cx, 0x0
-  jz .process_key
-  call delete_char
-  dec cx
-  mov word [bufflen], cx
-  jmp .process_key
+    call    break_line
+    mov     si, n_in_str
+    mov     cx, n_in_str_len
+    call    print_str
 
-  ret
+    call    read_input
 
+    mov     ax, 0
+    call    check_num_input
 
-clear_buffer:
-  pusha
-  mov word [bufflen], 0x0
-  popa
-  ret
+    cmp     byte [operation_flag], 0
+    je      error
 
+    mov     di, n
+    mov     si, input_buffer
+    call    atoi
 
-read_n:
-  pusha
-  
-  mov si, select_n_message
-  call println
-  call read_buffer
-  call put_neline
-  mov si, buffer
-  mov cx, word [bufflen]
-  mov si, buffer
-  call atoi ; convert buffer to number
-  mov word [n], ax ; save as Q
-  call clear_buffer
-  
-  popa
-  ret
+    ; transfer n bytes to the write buffer
 
+    call    transfer_n_bytes_from_ram
 
-read_head:
-  pusha
+    ; calculate the number of sectors to write
 
-  mov si, select_head_message
-  call println
-  call read_buffer
-  call put_neline
-  mov si, buffer
-  mov cx, word [bufflen]
-  mov si, buffer
-  call atoi ; convert buffer to number
-  mov word [head], ax ; save as Q
-  call clear_buffer
-  
-  popa
-  ret
+    xor     dx, dx
+    mov     ax, [n]
+    mov     bx, 512
+    div     bx
 
+    ; write data to floppy
 
-read_track:
-  pusha
+    push    ax
 
-  mov si, select_track_message
-  call println
-  call read_buffer
-  call put_neline
-  mov si, buffer
-  mov cx, word [bufflen]
-  mov si, buffer
-  call atoi ; convert buffer to number
-  mov word [track], ax ; save as Q
-  call clear_buffer
-  
-  popa
-  ret
+    xor     ax, ax
+    mov     es, ax
+    mov     bx, storage_buffer
 
-read_sector:
-  pusha
+    pop     ax
 
-  mov si, select_sector_message
-  call println
-  call read_buffer
-  call put_neline
-  mov si, buffer
-  mov cx, word [bufflen]
-  mov si, buffer
-  call atoi ; convert buffer to number
-  mov word [sector], ax ; save as Q
-  call clear_buffer
-  
-  popa
-  ret
+    mov     ah, DSK_WRITE
+    add     al, 1
+    mov     ch, [hts + 2]
+    mov     cl, [hts + 4]
+    mov     dh, [hts + 0]
+    mov     dl, 0
+    int     INT_DSK
+
+    ; print the error code
+
+    call    display_error_code
+
+    ; print the data written
+
+    call    break_line
+    call    get_cursor_pos
+
+    inc     dh
+    mov     dl, 0
+
+    mov     es, [address]
+    mov     bp, [address + 2]
+
+    mov     bl, 07h
+    mov     cx, 512
+
+    mov     ax, 1301h
+    int     10h
+
+    jmp     terminate
+
+; ========================================
+
+display_error_code:
+    push    ax
+
+    ; print "EC="
+
+    call    break_line
+    mov     si, err_code_msg
+    mov     cx, err_code_msg_len
+    call    print_str
+
+    ; print the error code (an integer)
+
+    pop     ax
+
+    mov     al, '0'
+    add     al, ah
+    mov     ah, VID_TTY
+    int     INT_VID
+
+    ret
+
+error:
+    call    get_cursor_pos
+
+    xor     ax, ax
+    mov     es, ax
+    mov     bp, err_msg
+
+    mov     cx, err_msg_len
+    mov     bl, 07h
+
+    mov     ax, VID_WRITE_STR
+    int     INT_VID
+
+    jmp     terminate
+
+terminate:
+    call    break_line
+    mov     si, pak_msg
+    mov     cx, pak_msg_len
+    call    print_str
+
+    wait_for_confirm:
+        mov     ah, KB_READ
+        int     INT_KB
+
+        cmp     al, KEY_ENTER
+        jne     wait_for_confirm
+
+    call    clear_screen
+
+    jmp     start
+
+; ========================================
+
+reset_memory:
+    call    reset_floppy
+    call    clear_vars
+    
+    mov     si, input_buffer
+    mov     di, input_buffer + 256
+    call    clear_buffer
+
+    mov     si, str_buffer
+    mov     di, str_buffer + 256
+    call    clear_buffer
+
+    mov     si, hts
+    mov     di, hts + 6
+    call    clear_buffer
+
+    mov     si, address
+    mov     di, address + 8
+    call    clear_buffer
+
+    mov     si, storage_buffer
+    mov     di, storage_buffer + 1
+    call    clear_buffer
+
+    call    reset_registers
+
+    ret
+
+; ----------------------------------------
 
 reset_floppy:
-  pusha
-  mov ah, DSK_RESET
-  int INT_DSK
-  popa
-  ret
+    mov     ah, DSK_RESET
+    int     INT_DSK
+    
+    ret
+
+; ----------------------------------------
 
 clear_vars:
-  pusha
-  mov word [bufflen], 0x0
-  mov word [n], 0x0
-  mov word [q], 0x0
-  mov word [head], 0x0
-  mov word [track], 0x0
-  mov word [sector], 0x0
-  popa
-  ret
+    mov     word [n], 0000h
+    mov     word [q], 0000h
+  
+    ret
+
+; ----------------------------------------
+
+; si - starting address of the buffer
+; di - ending address of the buffer
+clear_buffer:
+    clear_buffer_loop:
+        mov     byte [si], 0
+        inc     si
+
+        cmp     si, di
+        jl      clear_buffer_loop
+
+    ret
+
+; ----------------------------------------
+
+reset_registers:
+    xor     ax, ax
+    xor     bx, bx
+    xor     cx, cx
+    xor     dx, dx
+    xor     si, si
+    xor     di, di
+    mov     es, ax
+    xor     bp, bp
+
+    ret
+
+; ========================================
+
+stop:
 
 
 section .data
-press_any_key db "Press any key to continue", 0x0
-wrong_op_message db "You chose wrong operation, retry", 0x0
-select_operation_message db "Select operation (1, 2, 3): ", 0x0
-keyboard_floppy_message db "(KEYBOARD ==> FLOPPY)", 0x0
-select_n_message db "N (1-30000): ", 0x0
-select_q_message db "Q: ", 0x0
-select_head_message db "Head: ", 0x0
-select_track_message db "Track: ", 0x0
-select_sector_message db "Sector: ", 0x0
-floppy_ram_message db "(FLOPPY ==> RAM)", 0x0
-ram_floppy_message db "(RAM ==> FLOPPY)", 0x0
-input_string_message db "String: ", 0x0
-empty_string db 0x0
-address_help db "Segment:Address:", 0x0
-address_space db "____:____", 0x0
 
-segment_buffer dd 0
-address_buffer dd 0
 
+empty_str               db 00h
+
+pak_msg                 db "Press any key to continue...", 00h
+pak_msg_len             equ 28
+
+wrong_op_msg            db "ERR: Unknown option!", 00h
+wrong_op_msg_len        equ 20
+
+op_list_str             db "1. KBD ==> FLP | 2. FLP ==> RAM | 3. RAM ==> FLP : ", 00h
+op_list_str_len         equ 51
+
+n_in_str                db "N (times / sectors / bytes) = ", 00h
+n_in_str_len            equ 30
+
+hts_in_head_str         db "HTS:", 00h
+hts_in_head_str_len     equ 4
+
+hts_in_str              db "Head   = Track  = Sector = ", 00h
+hts_in_str_len          equ 9
+
+str_in_str              db "String = ", 00h
+str_in_str_len          equ 9
+
+addr_in_head_str        db "Specify the address (XXXX:YYYY):", 00h
+addr_in_head_str_len    equ 32
+
+addr_in_str             db "SEGMENT = OFFSET  = ", 00h
+addr_in_str_len         equ 10
+
+n                       dw 0
+q                       dw 0
+
+err_msg                 db " >> ERR", 00h
+err_msg_len             equ 7
+
+err_code_msg            db "EC=", 00h
+err_code_msg_len        equ 3
+
+operation_flag          dw 0
+mp_16bit_counter        dw 0
+copy_size               dw 0
+
+test_result             dw 0020h
+
+; ========================================
 
 section .bss
-buffer resb 0xff 
-bufflen resw 0x1
-storage_buffer resb 1
-n resw 0x1
-q resw 0x1
-head resw 0x1
-track resw 0x1
-sector resw 0x1
-segment_word resw 0x1
-address resw 0x1
 
-
-nhts                resb 8
-; Nr of stuff to read/write
-heads_count resw 0x1
-tracks_count resw 0x1
-sectors_count resw 0x1
-  
+input_buffer        resb 256
+str_buffer          resb 256
+hts                 resb 6
+address             resb 4
+storage_buffer      resb 1
